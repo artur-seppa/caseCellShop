@@ -1,0 +1,63 @@
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: casecellshop-adonis-redis
+    ports:
+      - '6379:6379'
+    # No persistence for dev/test — in-memory only
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Commander — browse Redis keys in the browser
+  #   http://localhost:8081
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: casecellshop-adonis-redis-commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - '8081:8081'
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Prometheus — scrapes /metrics every 5 s
+  #   http://localhost:9090
+  #   Paste any PromQL query in the Expression box and click Execute.
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: casecellshop-adonis-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    ports:
+      - '9090:9090'
+    # Lets Prometheus reach the AdonisJS server running on the host
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+  # Jaeger all-in-one — visualise OTel traces
+  #   http://localhost:16686
+  #   Set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 in .env to send spans
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: casecellshop-adonis-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - '16686:16686'  # Jaeger UI
+      - '4317:4317'    # OTLP gRPC receiver
+      - '4318:4318'    # OTLP HTTP receiver  ← use in OTEL_EXPORTER_OTLP_ENDPOINT

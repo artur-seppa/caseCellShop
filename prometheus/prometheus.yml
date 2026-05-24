@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: casecellshop
+    # host.docker.internal resolves to the host machine from inside a container
+    # (extra_hosts: host.docker.internal:host-gateway is set in docker-compose)
+    static_configs:
+      - targets: ['host.docker.internal:3333']
+    metrics_path: /metrics
