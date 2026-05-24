@@ -2,6 +2,7 @@ import app from '@adonisjs/core/services/app'
 import { type HttpContext, ExceptionHandler } from '@adonisjs/core/http'
 import { errors as vineErrors } from '@vinejs/vine'
 import { errors as httpErrors } from '@adonisjs/core'
+import { trace } from '@opentelemetry/api'
 
 export default class HttpExceptionHandler extends ExceptionHandler {
   /**
@@ -17,6 +18,17 @@ export default class HttpExceptionHandler extends ExceptionHandler {
   async handle(error: unknown, ctx: HttpContext) {
     // 422 Validation error
     if (error instanceof vineErrors.E_VALIDATION_ERROR) {
+      // Annotate the active OTel span with the actual field-level errors so
+      // Jaeger shows which fields failed instead of just "Validation failure".
+      const span = trace.getActiveSpan()
+      if (span) {
+        const fields = (error.messages as any[]).map((m) => m.field).join(', ')
+        span.addEvent('validation_error', {
+          'validation.fields': fields,
+          'validation.details': JSON.stringify(error.messages),
+        })
+      }
+
       return ctx.response.status(422).json({
         message: error.message,
         errors: error.messages,
@@ -40,6 +52,6 @@ export default class HttpExceptionHandler extends ExceptionHandler {
    * @note You should not attempt to send a response from this method.
    */
   async report(error: unknown, ctx: HttpContext) {
-    return super.report(error, ctx)
+    ctx.logger.error({ err: error }, 'unhandled_exception')
   }
 }

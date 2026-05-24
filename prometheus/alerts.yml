@@ -1,0 +1,60 @@
+groups:
+  - name: casecellshop
+    rules:
+
+      # Checkout error rate above 5% for 2 minutes
+      - alert: HighCheckoutErrorRate
+        expr: |
+          rate(casecellshop_checkout_total{status="error"}[2m])
+            / rate(casecellshop_checkout_total[2m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High checkout error rate ({{ $value | humanizePercentage }})"
+          runbook: "Check worker logs and ERP connectivity"
+
+      # Cache hit rate below 70% for 5 minutes
+      - alert: LowCacheHitRate
+        expr: |
+          rate(casecellshop_cache_operations_total{result="hit"}[5m])
+            / rate(casecellshop_cache_operations_total[5m]) < 0.70
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Product cache hit rate dropped below 70%"
+          runbook: "Verify Redis connectivity and TTL configuration"
+
+      # BullMQ queue depth above 50 jobs for 3 minutes (worker stalled)
+      - alert: QueueDepthHigh
+        expr: casecellshop_queue_depth > 50
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BullMQ checkout queue depth is {{ $value }} jobs"
+          runbook: "Check worker process and Redis connectivity"
+
+      # No checkout requests for 10 minutes — server may have died silently
+      - alert: NoCheckoutTraffic
+        expr: rate(casecellshop_checkout_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No checkout requests in the last 10 minutes"
+          runbook: "Verify API is up: GET /health — may indicate deploy failure or process crash"
+
+      # p95 checkout latency above 500 ms
+      - alert: SlowCheckout
+        expr: |
+          histogram_quantile(0.95,
+            rate(casecellshop_checkout_duration_seconds_bucket[5m])
+          ) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 checkout latency is {{ $value | humanizeDuration }}"
+          runbook: "Check DB query times and Redis response latency"
