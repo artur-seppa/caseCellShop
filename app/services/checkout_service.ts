@@ -140,7 +140,7 @@ export default class CheckoutService {
         orderId,
         status: 'PENDING',
         message: 'Order received. Payment is being processed.',
-        links: { status: `/orders/${orderId}` },
+        links: { status: `/api/v1/orders/${orderId}` },
       }
 
       // ── 5. Cache idempotency response ─────────────────────────────────────
