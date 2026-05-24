@@ -21,8 +21,8 @@ export default class ProductsController {
     const filters = await request.validateUsing(productQueryValidator)
     const result = await this.productService.listProducts(filters)
     return response.ok({
-      data: result.data,
-      total: result.data.length,
+      data: result.data.rows,
+      total: result.data.total,
       meta: {
         fromCache: result.fromCache,
         page: filters.page ?? 1,

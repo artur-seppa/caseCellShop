@@ -3,6 +3,7 @@ import { type HttpContext, ExceptionHandler } from '@adonisjs/core/http'
 import { errors as vineErrors } from '@vinejs/vine'
 import { errors as httpErrors } from '@adonisjs/core'
 import { trace } from '@opentelemetry/api'
+import { checkoutTotal } from '#start/metrics'
 
 export default class HttpExceptionHandler extends ExceptionHandler {
   /**
@@ -18,6 +19,14 @@ export default class HttpExceptionHandler extends ExceptionHandler {
   async handle(error: unknown, ctx: HttpContext) {
     // 422 Validation error
     if (error instanceof vineErrors.E_VALIDATION_ERROR) {
+      // Track validation errors on the checkout endpoint so the metric matches
+      // what the JSDoc on checkoutTotal describes (status = validation_error).
+      // VineJS throws before entering the controller try/catch, so this is the
+      // only place where the increment can happen reliably.
+      if (ctx.request.url().includes('/checkout')) {
+        checkoutTotal.inc({ status: 'validation_error' })
+      }
+
       // Annotate the active OTel span with the actual field-level errors so
       // Jaeger shows which fields failed instead of just "Validation failure".
       const span = trace.getActiveSpan()

@@ -51,12 +51,21 @@ if (app.getEnvironment() === 'web') {
 
   async function commitStock(productId: string, quantity: number, reservationId: string) {
     // Real stock decrement — the reservation is now "consumed".
-    // Use the same conditional-update pattern as a safety net.
-    await db
+    // The WHERE quantity >= quantity acts as a safety net against going negative.
+    // In normal flow this always succeeds (reservation already validated availability),
+    // so 0 rows affected indicates an out-of-band inconsistency worth alerting on.
+    const affected = await db
       .from('stocks')
       .where('product_id', productId)
       .where('quantity', '>=', quantity)
       .decrement('quantity', quantity)
+
+    if (!affected) {
+      logger.error(
+        { productId, quantity },
+        'commitStock: stock decrement affected 0 rows — stock may be inconsistent'
+      )
+    }
 
     await releaseReservation(reservationId)
 

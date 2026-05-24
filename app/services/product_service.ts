@@ -75,9 +75,14 @@ export default class ProductService {
     const page = filters.page ?? 1
     const offset = (page - 1) * perPage
 
-    const query = Product.query().preload('stock')
-    query.limit(perPage).offset(offset)
-    const rows = await query
-    return rows.map((r) => r.serialize())
+    const [rows, countRow] = await Promise.all([
+      Product.query().preload('stock').limit(perPage).offset(offset),
+      Product.query().count('* as total').first(),
+    ])
+
+    return {
+      rows: rows.map((r) => r.serialize()),
+      total: Number(countRow?.$extras?.total ?? 0),
+    }
   }
 }

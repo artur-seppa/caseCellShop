@@ -2,6 +2,7 @@ import app from '@adonisjs/core/services/app'
 import logger from '@adonisjs/core/services/logger'
 import db from '@adonisjs/lucid/services/db'
 import { checkoutQueue } from '#start/queue'
+import { queueDepth } from '#start/metrics'
 import { DateTime } from 'luxon'
 
 /**
@@ -127,9 +128,27 @@ if (app.getEnvironment() === 'web') {
     }
   }
 
+  async function updateQueueDepthMetric() {
+    const counts = await checkoutQueue.getJobCounts('waiting', 'delayed')
+    queueDepth.set({ queue: 'checkout' }, counts.waiting + counts.delayed)
+  }
+
   async function runRecovery() {
     await releaseExpiredReservations()
     await recoverOrphanedOrders()
+    await updateQueueDepthMetric()
+  }
+
+  async function scheduleNext() {
+    setTimeout(async () => {
+      try {
+        await runRecovery()
+      } catch (err) {
+        logger.error({ err }, 'Recovery: periodic scan failed')
+      } finally {
+        scheduleNext()
+      }
+    }, INTERVAL_MS)
   }
 
   setImmediate(async () => {
@@ -137,16 +156,10 @@ if (app.getEnvironment() === 'web') {
       await runRecovery()
     } catch (err) {
       logger.error({ err }, 'Recovery: initial scan failed')
+    } finally {
+      scheduleNext()
     }
   })
-
-  setInterval(async () => {
-    try {
-      await runRecovery()
-    } catch (err) {
-      logger.error({ err }, 'Recovery: periodic scan failed')
-    }
-  }, INTERVAL_MS)
 
   logger.info('Recovery worker started (interval: 5min)')
 }

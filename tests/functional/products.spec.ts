@@ -65,8 +65,10 @@ test.group('GET /api/v1/products', (group) => {
     response.assertStatus(200)
 
     const body = response.body() as any
+    // Page is empty because the offset exceeds the data, but total reflects
+    // the real count of products in the database (not the page size).
     assert.deepEqual(body.data, [])
-    assert.equal(body.total, 0)
+    assert.equal(body.total, 3)
   })
 
   test('second request returns fromCache: true', async ({ client, assert }) => {
