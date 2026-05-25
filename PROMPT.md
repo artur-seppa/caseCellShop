@@ -1,0 +1,5 @@
+- Claude você como um desenvolvedor node sênior e experiente no mercado, com atuação em e-comerce e IA, quero me ajude no desafio tecnico de TOTVS, me apresente as respostas e suas justificativas utilizadas para eu opinar em cima. Quero que você busque e utilize docs de stacks do mercado para auxiliar na resposta e ter fundamento também
+
+- Claude agora olhando a solução de arquitetura vamos desenvolver a parte 1.B do case, usando as boas praticas de adonis (docs: https://docs.adonisjs.com/guides/basics/routing) com ferramentas já integradas e prontas para agilizar o desenvolvimento e entregar um produto com tecnologias já validadas, antes me apresente os arquivos a serem desenvolvidos para eu opinar sobre.
+
+- Claude você como um analista sênior deve efetuar a revisão de código da aplicação, procurando melhorias/bugs para serem corrigidos. Me traga os problemas trazidos para eu opinar.
