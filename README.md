@@ -709,6 +709,8 @@ O teste de concorrência mais importante envia 5 requests simultâneos de checko
 
 6. **Granularidade do recovery job** — O intervalo de 5 minutos significa que um pedido órfão pode ficar PENDING por até 10 minutos (5 min de threshold + 5 min de intervalo). Aceitável para o desafio; ajuste os thresholds para SLAs de produção.
 
+7. **Um produto por pedido** — O checkout aceita um único `productId` por requisição. Em produção, o fluxo seria de carrinho com múltiplos itens, reservas em batch e rollback parcial por item. Simplificação intencional para manter o foco nos conceitos de reserva atômica, saga e idempotência.
+
 ---
 
 ## Variáveis de Ambiente
