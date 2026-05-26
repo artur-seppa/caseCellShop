@@ -21,28 +21,42 @@ export const OrderFactory = Factory.define(Order, ({ faker }: FactoryContextCont
     status: 'PENDING',
     idempotencyKey: ulid(),
     erpJobId: null,
+    transactionId: null,   // populated only after payment is authorised (status ≥ PAID)
     failureReason: null,
   }
 })
   /**
-   * ERP billing confirmed.
+   * Payment authorised — gateway returned a transactionId, PAID persisted.
+   * Billing job not yet enqueued (or in flight). transactionId is populated.
+   *   const order = await OrderFactory.apply('paid').create()
+   */
+  .state('paid', (order: Order) => {
+    order.status = 'PAID'
+    order.transactionId = `txn-${ulid()}`
+  })
+
+  /**
+   * ERP billing confirmed. Payment was authorised first, so transactionId exists.
    *   const order = await OrderFactory.apply('confirmed').create()
    */
   .state('confirmed', (order: Order) => {
     order.status = 'CONFIRMED'
+    order.transactionId = `txn-${ulid()}`
   })
 
   /**
-   * Order failed with a reason.
+   * ERP billing failed (payment did succeed, so transactionId is populated).
    *   const order = await OrderFactory.apply('failed').create()
    */
   .state('failed', (order: Order) => {
     order.status = 'FAILED'
+    order.transactionId = `txn-${ulid()}`
     order.failureReason = 'Payment declined by ERP'
   })
 
   /**
    * Order is in payment processing (Saga Step 1 in flight).
+   * transactionId is not yet set — gateway hasn't responded.
    *   const order = await OrderFactory.apply('paymentProcessing').create()
    */
   .state('paymentProcessing', (order: Order) => {
@@ -52,6 +66,7 @@ export const OrderFactory = Factory.define(Order, ({ faker }: FactoryContextCont
 
   /**
    * Payment declined — reservation kept for retry window.
+   * transactionId is null because the gateway never authorised the charge.
    *   const order = await OrderFactory.apply('paymentFailed').create()
    */
   .state('paymentFailed', (order: Order) => {
@@ -61,11 +76,13 @@ export const OrderFactory = Factory.define(Order, ({ faker }: FactoryContextCont
 
   /**
    * Order is in ERP billing step (Saga Step 2 in flight).
+   * Payment was already authorised, so transactionId is populated.
    *   const order = await OrderFactory.apply('billing').create()
    */
   .state('billing', (order: Order) => {
     order.status = 'BILLING'
     order.erpJobId = `billing-${order.id}`
+    order.transactionId = `txn-${ulid()}`
   })
 
   /**

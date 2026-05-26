@@ -30,15 +30,33 @@ test.group('GET /api/v1/orders/:id', (group) => {
     assert.exists(body.updatedAt)
   })
 
-  test('returns order with CONFIRMED status', async ({ client, assert }) => {
+  test('returns order with CONFIRMED status and transactionId', async ({ client, assert }) => {
     const order = await OrderFactory.apply('confirmed').create()
 
     const response = await client.get(`/api/v1/orders/${order.id}`)
     response.assertStatus(200)
-    assert.equal((response.body() as any).status, 'CONFIRMED')
+
+    const body = response.body() as any
+    assert.equal(body.status, 'CONFIRMED')
+    // CONFIRMED means payment was authorised — transactionId must be present
+    assert.isString(body.transactionId)
+    assert.match(body.transactionId, /^txn-/)
   })
 
-  test('returns order with FAILED status and failure_reason', async ({ client, assert }) => {
+  test('returns order with PAID status and transactionId', async ({ client, assert }) => {
+    const order = await OrderFactory.apply('paid').create()
+
+    const response = await client.get(`/api/v1/orders/${order.id}`)
+    response.assertStatus(200)
+
+    const body = response.body() as any
+    assert.equal(body.status, 'PAID')
+    assert.isString(body.transactionId)
+    assert.match(body.transactionId, /^txn-/)
+  })
+
+  test('returns order with FAILED status, failureReason and transactionId', async ({ client, assert }) => {
+    // ERP failure: payment succeeded (transactionId exists) but ERP rejected
     const order = await OrderFactory.apply('failed').create()
 
     const response = await client.get(`/api/v1/orders/${order.id}`)
@@ -47,9 +65,13 @@ test.group('GET /api/v1/orders/:id', (group) => {
     const body = response.body() as any
     assert.equal(body.status, 'FAILED')
     assert.equal(body.failureReason, 'Payment declined by ERP')
+    // Payment was authorised before ERP failed — transactionId must be present
+    assert.isString(body.transactionId)
+    assert.match(body.transactionId, /^txn-/)
   })
 
-  test('returns order with PAYMENT_FAILED status', async ({ client, assert }) => {
+  test('returns order with PAYMENT_FAILED status and no transactionId', async ({ client, assert }) => {
+    // Card declined: gateway never authorised — transactionId must be null
     const order = await OrderFactory.apply('paymentFailed').create()
 
     const response = await client.get(`/api/v1/orders/${order.id}`)
@@ -58,6 +80,18 @@ test.group('GET /api/v1/orders/:id', (group) => {
     const body = response.body() as any
     assert.equal(body.status, 'PAYMENT_FAILED')
     assert.equal(body.failureReason, 'Card declined')
+    assert.isNull(body.transactionId)
+  })
+
+  test('PENDING order has no transactionId (payment not yet authorised)', async ({ client, assert }) => {
+    const order = await OrderFactory.create()
+
+    const response = await client.get(`/api/v1/orders/${order.id}`)
+    response.assertStatus(200)
+
+    const body = response.body() as any
+    assert.equal(body.status, 'PENDING')
+    assert.isNull(body.transactionId)
   })
 
   test('returns order with EXPIRED status', async ({ client, assert }) => {
