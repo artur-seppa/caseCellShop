@@ -26,6 +26,11 @@ export type PaymentOutcome = PaymentResult | PaymentFailure
  *
  * Non-retryable failures simulate: card declined, insufficient funds.
  * Retryable failures simulate: gateway timeout, 5xx from processor.
+ *
+ * Production note: real gateways (Stripe, etc.) aceitam um idempotency key por
+ * request — normalmente o orderId — e garantem a mesma resposta para a mesma
+ * chave. A idempotência da nossa saga é tratada via status PAID no banco
+ * (ver worker.ts handlePayment), não no gateway mock.
  */
 export default class PaymentService {
   async processPayment(_orderId: string, _amountCents: number): Promise<PaymentOutcome> {

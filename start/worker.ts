@@ -49,38 +49,107 @@ if (app.getEnvironment() === 'web') {
       .update({ released_at: now(), updated_at: now() })
   }
 
-  async function commitStock(productId: string, quantity: number, reservationId: string) {
-    // Real stock decrement — the reservation is now "consumed".
-    // The WHERE quantity >= quantity acts as a safety net against going negative.
-    // In normal flow this always succeeds (reservation already validated availability),
-    // so 0 rows affected indicates an out-of-band inconsistency worth alerting on.
-    const affected = await db
-      .from('stocks')
-      .where('product_id', productId)
-      .where('quantity', '>=', quantity)
-      .decrement('quantity', quantity)
+  async function commitStock(
+    productId: string,
+    quantity: number,
+    reservationId: string,
+    orderId: string
+  ) {
+    // ── Why a transaction + idempotency guard? ───────────────────────────────
+    //
+    // BullMQ retries the ENTIRE job from scratch on failure — no checkpointing.
+    // Without protection, a crash between "decrement stock" and "release
+    // reservation" would cause a double-decrement on the next retry.
+    //
+    // Strategy: use the reservation as an idempotency guard inside a transaction.
+    //
+    //   First run:
+    //     UPDATE stock_reservations SET released_at = NOW() WHERE released_at IS NULL
+    //     → affects 1 row → proceed with stock decrement + CONFIRMED
+    //
+    //   Retry (reservation already committed):
+    //     UPDATE ... WHERE released_at IS NULL → affects 0 rows → skip decrement
+    //     → just re-set order to CONFIRMED (idempotent)
+    //
+    // The transaction ensures atomicity: if anything inside fails, the DB rolls
+    // back entirely and the next retry sees released_at = NULL again → safe retry.
+    // ─────────────────────────────────────────────────────────────────────────
+    await db.transaction(async (trx) => {
+      const released = await trx
+        .from('stock_reservations')
+        .where('id', reservationId)
+        .whereNull('released_at')
+        .update({ released_at: now(), updated_at: now() })
 
-    if (!affected) {
-      logger.error(
-        { productId, quantity },
-        'commitStock: stock decrement affected 0 rows — stock may be inconsistent'
-      )
-    }
+      if (!released) {
+        // Reservation already released — BullMQ retry after a successful commit.
+        // Stock was already decremented; just re-confirm the order and exit.
+        logger.warn(
+          { orderId, reservationId },
+          'commitStock: reservation already released — idempotent retry, skipping decrement'
+        )
+        await trx.from('orders').where('id', orderId).update({ status: 'CONFIRMED', updated_at: now() })
+        return
+      }
 
-    await releaseReservation(reservationId)
+      // First execution: decrement physical stock.
+      // WHERE quantity >= quantity is a safety net against going negative.
+      const affected = await trx
+        .from('stocks')
+        .where('product_id', productId)
+        .where('quantity', '>=', quantity)
+        .decrement('quantity', quantity)
 
-    // Invalidate the product cache so GET /products reflects the new quantity.
-    // The list cache (products:list:*) uses a per-filter key and would be
-    // stale for up to LIST_TTL. We only bust the per-item key here; the list
-    // cache will expire naturally (5 min TTL is acceptable staleness for a
-    // catalogue listing, but a single-product view should always be fresh).
+      if (!affected) {
+        logger.error(
+          { productId, quantity, orderId },
+          'commitStock: stock decrement affected 0 rows — out-of-band inconsistency'
+        )
+      }
+
+      await trx.from('orders').where('id', orderId).update({ status: 'CONFIRMED', updated_at: now() })
+    })
+
+    // Cache invalidation is outside the transaction — cache is not transactional.
+    // A stale list (products:list:*) for up to 5 min is acceptable; the single-
+    // item view is busted immediately so GET /products/:id is always fresh.
     await cache.delete({ key: `products:item:${productId}` })
   }
 
   // ─── Step 1: payment ──────────────────────────────────────────────────────
 
   async function handlePayment(job: { id?: string; data: Record<string, any> }) {
-    const { orderId, reservationId, productId, quantity, totalAmount } = job.data
+    const { orderId, totalAmount } = job.data
+
+    // ── PAID guard (idempotency checkpoint) ──────────────────────────────────
+    // If a previous attempt already set the order to PAID (payment authorised)
+    // but crashed before enqueuing the billing job, we skip the payment call
+    // entirely and go straight to re-enqueuing billing. This prevents a duplicate
+    // charge on retry.
+    //
+    // Two signals are checked — either alone is sufficient, but together they
+    // cover edge cases where one might be inconsistent:
+    //   • status = 'PAID'           → normal checkpoint (written with transaction_id atomically)
+    //   • transaction_id IS NOT NULL → defence-in-depth: if status was somehow
+    //                                  not updated but the gateway already charged,
+    //                                  the stored transaction_id proves the charge occurred
+    const currentOrder = await db.from('orders').where('id', orderId).select('status', 'transaction_id').first()
+    if (currentOrder?.status === 'PAID' || currentOrder?.transaction_id) {
+      logger.warn(
+        { orderId, transactionId: currentOrder?.transaction_id },
+        'handlePayment: payment already authorised — re-enqueuing billing (idempotent retry)'
+      )
+      await checkoutQueue.add(
+        'process-billing',
+        // Merge job.data (checkout base fields) with the persisted transactionId.
+        // job.data does NOT carry transactionId (it's from the payment outcome, not
+        // the original checkout payload), so we pull it from the DB — the source
+        // of truth after a crash/retry.
+        { ...job.data, transactionId: currentOrder?.transaction_id },
+        { jobId: `billing-${orderId}`, attempts: 5, backoff: { type: 'exponential', delay: 1000 } }
+      )
+      return
+    }
 
     await db.from('orders').where('id', orderId).update({
       status: 'PAYMENT_PROCESSING',
@@ -104,23 +173,35 @@ if (app.getEnvironment() === 'web') {
         updated_at: now(),
       })
       jobsProcessed.inc({ queue: 'checkout', job_name: 'process-payment', result: 'card_declined' })
-      logger.warn({ orderId }, `Payment declined — order PAYMENT_FAILED (reservation held for retry)`)
+      logger.warn({ orderId }, 'Payment declined — order PAYMENT_FAILED (reservation held for retry)')
       return // Do NOT throw — BullMQ must not retry a card decline
     }
 
-    // Payment authorised → enqueue ERP billing
+    // ── Payment authorised ────────────────────────────────────────────────────
+    // Persist PAID status + transaction_id BEFORE enqueuing billing.
+    // This is the atomic checkpoint: if we crash after this UPDATE but before
+    // checkoutQueue.add(), the next retry detects PAID / transaction_id above
+    // and re-enqueues billing without re-charging the customer.
+    // transaction_id is stored here so the order record carries the gateway
+    // reference for reconciliation and eventual refunds.
+    await db.from('orders').where('id', orderId).update({
+      status: 'PAID',
+      transaction_id: outcome.transactionId,
+      updated_at: now(),
+    })
+
     jobsProcessed.inc({ queue: 'checkout', job_name: 'process-payment', result: 'completed' })
-    logger.info({ orderId, transactionId: outcome.transactionId }, 'Payment authorised')
+    logger.info({ orderId, transactionId: outcome.transactionId }, 'Payment authorised — order PAID')
 
     await checkoutQueue.add(
       'process-billing',
       {
-        orderId,
-        reservationId,
-        productId,
-        quantity,
-        transactionId: outcome.transactionId,
+        // job.data carries all base fields from checkout (orderId, reservationId,
+        // productId, productName, quantity, unitPrice, totalAmount, customerId).
+        // transactionId is the only new field produced by the payment step —
+        // placed last so it always wins over any future job.data addition.
         ...job.data,
+        transactionId: outcome.transactionId,
       },
       {
         jobId: `billing-${orderId}`,
@@ -134,6 +215,30 @@ if (app.getEnvironment() === 'web') {
 
   async function handleBilling(job: { id?: string; data: Record<string, any> }) {
     const { orderId, reservationId, productId, quantity } = job.data
+
+    // ── Terminal state guard ─────────────────────────────────────────────────
+    // BullMQ retries the entire job from scratch. If commitStock's transaction
+    // already committed (order → CONFIRMED) but the process crashed before BullMQ
+    // recorded the success, the retry would overwrite CONFIRMED with BILLING.
+    // Checking the current status prevents that regression.
+    const current = await db.from('orders').where('id', orderId).select('status').first()
+    // Terminal states → already processed, skip entirely
+    if (current?.status === 'CONFIRMED' || current?.status === 'FAILED') {
+      logger.info(
+        { orderId, status: current.status },
+        'handleBilling: order already in terminal state — idempotent retry, skipping'
+      )
+      return
+    }
+
+    // Expected entry states: PAID (normal) or BILLING (retry mid-processing)
+    // Any other state is unexpected — log a warning but proceed cautiously
+    if (current?.status !== 'PAID' && current?.status !== 'BILLING') {
+      logger.warn(
+        { orderId, status: current?.status },
+        'handleBilling: unexpected order status — expected PAID or BILLING'
+      )
+    }
 
     await db.from('orders').where('id', orderId).update({
       status: 'BILLING',
@@ -162,12 +267,8 @@ if (app.getEnvironment() === 'web') {
       throw new Error('ERP unavailable (simulated 5xx) — will retry')
     }
 
-    // Success: commit the stock and mark confirmed
-    await commitStock(productId, quantity, reservationId)
-    await db.from('orders').where('id', orderId).update({
-      status: 'CONFIRMED',
-      updated_at: now(),
-    })
+    // Success: commit stock + release reservation + mark CONFIRMED (atomic transaction inside commitStock)
+    await commitStock(productId, quantity, reservationId, orderId)
     jobsProcessed.inc({ queue: 'checkout', job_name: 'process-billing', result: 'completed' })
     logger.info({ orderId }, 'ERP billing confirmed — order CONFIRMED, stock committed')
   }

@@ -125,6 +125,14 @@ export class OrderSchema extends BaseModel {
   @column()
   declare erpJobId: string | null
 
+  /**
+   * Payment gateway authorisation reference (e.g. txn-01JVXY...).
+   * Populated when status transitions to PAID. NULL for orders that
+   * fail before payment is authorised.
+   */
+  @column()
+  declare transactionId: string | null
+
   @column()
   declare failureReason: string | null
 
