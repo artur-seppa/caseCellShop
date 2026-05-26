@@ -18,7 +18,7 @@ export default {
   },
   snakeCase: true,
   debug: false,
-  ignore: ['/swagger', '/docs', '/health', '/metrics', '/'],
+  ignore: ['/swagger', '/docs', '/health', '/metrics', '/', '/bullboard'],
   preferredPutPatch: 'PUT',
   common: {
     parameters: {},

@@ -79,6 +79,7 @@ export default defineConfig({
     { file: () => import('#start/metrics'), environment: ['web'] },
     { file: () => import('#start/worker'), environment: ['web'] },
     { file: () => import('#start/recovery_worker'), environment: ['web'] },
+    { file: () => import('#start/bullboard'), environment: ['web'] },
   ],
 
   /*
