@@ -43,7 +43,8 @@ Construído com **AdonisJS v6** · **SQLite** · **Redis** · **BullMQ** · **Ty
                                 │                                     │
                                 │  Step 1: pagamento                  │
                                 │    → PAYMENT_PROCESSING             │
-                                │    → sucesso: enfileira Step 2      │
+                                │    → sucesso: → PAID                │
+                                │               enfileira Step 2      │
                                 │    → cartão recusado: PAYMENT_FAILED│
                                 │    → erro gateway: retry (3x)       │
                                 │                                     │
@@ -62,12 +63,23 @@ Construído com **AdonisJS v6** · **SQLite** · **Redis** · **BullMQ** · **Ty
 ```
                     ┌─► PAYMENT_FAILED  (cartão recusado / gateway esgotado)
                     │
-PENDING ──► PAYMENT_PROCESSING ──► BILLING ──► CONFIRMED
-                                      │
-                                      └─► FAILED  (erro ERP, reserva liberada)
+PENDING ──► PAYMENT_PROCESSING ──► PAID ──► BILLING ──► CONFIRMED
+                                               │
+                                               └─► FAILED  (erro ERP, reserva liberada)
 
 PENDING ──► EXPIRED  (TTL da reserva atingido antes do worker processar)
 ```
+
+| Status | Significado |
+|--------|-------------|
+| `PENDING` | Pedido criado, reserva ativa, job na fila |
+| `PAYMENT_PROCESSING` | Gateway sendo chamado |
+| `PAID` | Pagamento autorizado pelo gateway — checkpoint persistido antes de chamar o ERP |
+| `BILLING` | Faturamento no ERP em andamento |
+| `CONFIRMED` | ERP confirmou, estoque decrementado permanentemente |
+| `PAYMENT_FAILED` | Gateway recusou (cartão) ou esgotou retries |
+| `FAILED` | ERP recusou ou esgotou retries — reserva liberada |
+| `EXPIRED` | TTL de 15 min atingido sem conclusão — reserva liberada |
 
 ---
 
@@ -305,6 +317,12 @@ Métricas Prometheus (formato prom-client).
 
 Swagger UI / OpenAPI 3.0 JSON.
 
+### Bull Board — `http://localhost:3334`
+
+Dashboard oficial [Bull Board](https://github.com/felixmosh/bull-board) para monitoramento das filas BullMQ. Sobe automaticamente junto com `npm run dev` (apenas ambiente `web`) em porta separada da API para não interferir com o middleware CSRF/sessão do AdonisJS.
+
+Porta configurável via variável de ambiente `BULL_BOARD_PORT` (padrão: `3334`).
+
 ---
 
 ## Regras de Negócio
@@ -371,6 +389,16 @@ Comportamento em falhas:
 | Faturamento ERP: erro técnico (5xx) | 5x exponencial | `FAILED` | Liberada ao esgotar |
 | Tudo certo | — | `CONFIRMED` | Liberada, estoque decrementado permanentemente |
 
+#### Idempotência do worker (checkpoint PAID)
+
+O status `PAID` funciona como um **checkpoint de idempotência persistido no banco**. Se o processo cair após o gateway autorizar o pagamento mas antes de enfileirar o job de faturamento, o BullMQ re-executa o job desde o início. O guard no início do `handlePayment` detecta `status = PAID` e pula o gateway diretamente para re-enfileirar o faturamento — sem cobrar o cliente novamente.
+
+```
+Crash entre gateway ✓ e UPDATE PAID  → Redis cache do PaymentService absorve (gateway mock)
+Crash entre UPDATE PAID e queue.add  → guard PAID detecta, re-enfileira billing sem nova cobrança ✅
+Crash entre commitStock ✓ e BullMQ ✓ → guard CONFIRMED/FAILED em handleBilling, retorno imediato ✅
+```
+
 ### Recovery Job
 
 Um job em background roda a cada **5 minutos** para detectar pedidos presos em `PENDING` há mais de 5 minutos (órfãos causados por crash do servidor após inserir o pedido mas antes de enfileirar o job BullMQ). Eles são re-enfileirados automaticamente.
@@ -420,7 +448,8 @@ npm run dev        # inicia o servidor da API
 |------------|-----|-----------|
 | Prometheus | http://localhost:9090 | Coleta `/metrics` a cada 5s — consulte contadores e histogramas |
 | Jaeger | http://localhost:16686 | UI de traces distribuídos (OTel) — árvore completa de spans |
-| Redis Commander | http://localhost:8081 | Inspecione chaves Redis (cache, jobs BullMQ) |
+| Redis Commander | http://localhost:8081 | Inspecione chaves Redis (cache, idempotência) |
+| Bull Board | http://localhost:3334 | Dashboard oficial BullMQ — jobs ativos, falhos, retry counts, detalhes de erro |
 
 ---
 
@@ -711,6 +740,8 @@ O teste de concorrência mais importante envia 5 requests simultâneos de checko
 
 7. **Um produto por pedido** — O checkout aceita um único `productId` por requisição. Em produção, o fluxo seria de carrinho com múltiplos itens, reservas em batch e rollback parcial por item. Simplificação intencional para manter o foco nos conceitos de reserva atômica, saga e idempotência.
 
+8. **Sem retry de forma de pagamento no mesmo pedido** — Em caso de `PAYMENT_FAILED` por cartão recusado, o cliente precisa fazer um novo `POST /checkout` com nova `Idempotency-Key`, criando um novo pedido. O caminho correto em produção seria um endpoint dedicado `POST /orders/:id/payment` que aceitasse uma nova forma de pagamento e re-enfileirasse o `process-payment` no pedido existente — não foi implementado aqui por simplicidade.
+
 ---
 
 ## Variáveis de Ambiente
@@ -727,7 +758,11 @@ O teste de concorrência mais importante envia 5 requests simultâneos de checko
 | `REDIS_PORT` | `6379` | Porta do Redis |
 | `REDIS_PASSWORD` | *(opcional)* | Senha do Redis |
 | `SESSION_DRIVER` | `cookie` | Driver de sessão do AdonisJS |
-| `ERP_FAILURE_RATE` | `0` | Taxa simulada de falha no ERP (0–100) |
+| `PAYMENT_FAILURE_RATE` | `0` | % de chamadas ao gateway de pagamento que falham (0–100) |
+| `PAYMENT_RETRYABLE_RATE` | `50` | % das falhas de pagamento que são retryáveis (5xx vs 4xx) |
+| `ERP_FAILURE_RATE` | `0` | % de chamadas ao ERP que falham (0–100) |
+| `RESERVATION_EXPIRY_MINUTES` | `15` | Tempo em minutos que a reserva de estoque fica ativa |
+| `BULL_BOARD_PORT` | `3334` | Porta do servidor Bull Board (dashboard de filas BullMQ) |
 | `APP_NAME` | `casecellshop` | Nome do serviço (usado em logs e no `service.name` do OTel) |
 | `APP_VERSION` | `0.0.1` | Versão do serviço (usado no `service.version` do OTel) |
 | `APP_ENV` | `development` | Ambiente de deploy (usado no `deployment.environment` do OTel) |

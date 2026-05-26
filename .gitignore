@@ -27,6 +27,7 @@ yarn-error.log
 
 # SQLite database files (generated at runtime)
 data/
+database/*.sqlite3
 
 # AI assistant context (internal only)
 CLAUDE.md
